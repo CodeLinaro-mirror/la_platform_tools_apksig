@@ -72,9 +72,6 @@ public class SigningCertificateLineage {
 
     private static final int CURRENT_VERSION = FIRST_VERSION;
 
-    /** special value used to see if cert is in package */
-    private static final int PAST_CERT_EXISTS = 0;
-
     /** accept data from already installed pkg with this cert */
     private static final int PAST_CERT_INSTALLED_DATA = 1;
 
@@ -83,6 +80,19 @@ public class SigningCertificateLineage {
 
     /** grant SIGNATURE permissions to pkgs with this cert */
     private static final int PAST_CERT_PERMISSION = 4;
+
+    /**
+     * Enable updates back to this certificate.  WARNING: this effectively removes any benefit of
+     * signing certificate changes, since a compromised key could retake control of an app even
+     * after change, and should only be used if there is a problem encountered when trying to ditch
+     * an older cert.
+     */
+    private static final int PAST_CERT_ROLLBACK = 8;
+
+    /**
+     * Preserve authenticator module-based access in AccountManager gated by signing certificate.
+     */
+    private static final int PAST_CERT_AUTH = 16;
 
     private final int mMinSdkVersion;
 
@@ -137,7 +147,6 @@ public class SigningCertificateLineage {
      *     Use <code> readFromApkFile</code> to handle this case.
      * </note>
      * @param attrValue
-     * @return
      */
     public static SigningCertificateLineage readFromV3AttributeValue(byte[] attrValue)
             throws IOException {
@@ -206,7 +215,7 @@ public class SigningCertificateLineage {
         if (childCapabilities == null) {
             throw new NullPointerException("childCapabilities == null");
         }
-        if (mSigningLineage.size() == 0) {
+        if (mSigningLineage.isEmpty()) {
             throw new IllegalArgumentException("Cannot spawn descendant signing certificate on an"
                     + " empty SigningCertificateLineage: no parent node");
         }
@@ -277,7 +286,7 @@ public class SigningCertificateLineage {
 
     private SigningCertificateLineage spawnFirstDescendant(
             SignerConfig parent, SignerCapabilities signerCapabilities) {
-        if (mSigningLineage.size() > 0) {
+        if (!mSigningLineage.isEmpty()) {
             throw new IllegalStateException("SigningCertificateLineage already has its first node");
         }
 
@@ -410,7 +419,8 @@ public class SigningCertificateLineage {
     // TODO add API to modify flags corresponding to a given signing certificate
 
     private static int calculateDefaultFlags() {
-        return PAST_CERT_INSTALLED_DATA | PAST_CERT_PERMISSION | PAST_CERT_SHARED_USER_ID;
+        return PAST_CERT_INSTALLED_DATA | PAST_CERT_PERMISSION
+                | PAST_CERT_SHARED_USER_ID | PAST_CERT_AUTH;
     }
 
     /**
@@ -427,10 +437,8 @@ public class SigningCertificateLineage {
         if (x509Certificate == null) {
             throw new NullPointerException("x509Certificate == null");
         }
-        int index = -1;
         for (int i = 0; i < mSigningLineage.size(); i++) {
             if (mSigningLineage.get(i).signingCert.equals(x509Certificate)) {
-                index = i;
                 return new SigningCertificateLineage(
                         mMinSdkVersion, new ArrayList<>(mSigningLineage.subList(0, i + 1)));
             }
@@ -455,7 +463,7 @@ public class SigningCertificateLineage {
      */
     public static SigningCertificateLineage consolidateLineages(
             List<SigningCertificateLineage> lineages) {
-        if (lineages == null || lineages.size() == 0) {
+        if (lineages == null || lineages.isEmpty()) {
             return null;
         }
         int largestIndex = 0;
@@ -572,6 +580,39 @@ public class SigningCertificateLineage {
                     mFlags |= PAST_CERT_PERMISSION;
                 } else {
                     mFlags &= ~PAST_CERT_PERMISSION;
+                }
+                return this;
+            }
+
+            /**
+             * Set the {@code PAST_CERT_ROLLBACK} flag in this capabilities object.  This flag
+             * is used by the platform to determine if this app is willing to upgrade to a new
+             * version that is signed by one of its past signing certificates.
+             *
+             * <note> WARNING: this effectively removes any benefit of signing certificate changes,
+             * since a compromised key could retake control of an app even after change, and should
+             * only be used if there is a problem encountered when trying to ditch an older cert
+             * </note>
+             */
+            public Builder setRollback(boolean enabled) {
+                if (enabled) {
+                    mFlags |= PAST_CERT_ROLLBACK;
+                } else {
+                    mFlags &= ~PAST_CERT_ROLLBACK;
+                }
+                return this;
+            }
+
+            /**
+             * Set the {@code PAST_CERT_AUTH} flag in this capabilities object.  This flag
+             * is used by the platform to determine whether or not privileged access based on
+             * authenticator module signing certificates should be granted.
+             */
+            public Builder setAuth(boolean enabled) {
+                if (enabled) {
+                    mFlags |= PAST_CERT_AUTH;
+                } else {
+                    mFlags &= ~PAST_CERT_AUTH;
                 }
                 return this;
             }
