@@ -106,7 +106,7 @@ public class ChainedDataSource implements DataSource {
         long beginLocalOffset = firstSource.getSecond();
         DataSource beginSource = mSources[beginIndex];
 
-        if (beginLocalOffset + size <= beginSource.size() || size == 0) {
+        if (beginLocalOffset + size <= beginSource.size()) {
             return beginSource.slice(beginLocalOffset, size);
         }
 

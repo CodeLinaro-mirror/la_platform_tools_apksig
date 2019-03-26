@@ -25,7 +25,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 
 /**
- * {@link DataSource} backed by a {@link RandomAccessFile}.
+ * {@link DataSource} backed by a {@link FileChannel} for {@link RandomAccessFile} access.
  */
 public class RandomAccessFileDataSource implements DataSource {
 
@@ -108,6 +108,7 @@ public class RandomAccessFileDataSource implements DataSource {
         while (remaining > 0) {
             int chunkSize = (int) Math.min(remaining, buf.capacity());
             int chunkRemaining = chunkSize;
+            buf.limit(chunkSize);
             synchronized (mChannel) {
                 mChannel.position(chunkOffsetInFile);
                 while (chunkRemaining > 0) {
