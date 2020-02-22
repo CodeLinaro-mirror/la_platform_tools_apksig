@@ -754,7 +754,7 @@ public class ApkSigningBlockUtils {
     private static void computeApkVerityDigest(DataSource beforeCentralDir, DataSource centralDir,
             DataSource eocd, Map<ContentDigestAlgorithm, byte[]> outputContentDigests)
             throws IOException, NoSuchAlgorithmException {
-        ByteBuffer encoded = createVerityDigestBuffer();
+        ByteBuffer encoded = createVerityDigestBuffer(true);
         // Use 0s as salt for now.  This also needs to be consistent in the fsverify header for
         // kernel to use.
         VerityTreeBuilder builder = new VerityTreeBuilder(new byte[8]);
@@ -764,14 +764,16 @@ public class ApkSigningBlockUtils {
         outputContentDigests.put(ContentDigestAlgorithm.VERITY_CHUNKED_SHA256, encoded.array());
     }
 
-    private static ByteBuffer createVerityDigestBuffer() {
+    private static ByteBuffer createVerityDigestBuffer(boolean includeSourceDataSize) {
         // FORMAT:
         // OFFSET       DATA TYPE  DESCRIPTION
         // * @+0  bytes uint8[32]  Merkle tree root hash of SHA-256
-        // * @+32 bytes int64      Length of source data
+        // * @+32 bytes int64      Length of source data (Optional)
         int backBufferSize =
-                ContentDigestAlgorithm.VERITY_CHUNKED_SHA256.getChunkDigestOutputSizeBytes() +
-                        Long.SIZE / Byte.SIZE;
+                ContentDigestAlgorithm.VERITY_CHUNKED_SHA256.getChunkDigestOutputSizeBytes();
+        if (includeSourceDataSize) {
+            backBufferSize += Long.SIZE / Byte.SIZE;
+        }
         ByteBuffer encoded = ByteBuffer.allocate(backBufferSize);
         encoded.order(ByteOrder.LITTLE_ENDIAN);
         return encoded;
@@ -780,14 +782,13 @@ public class ApkSigningBlockUtils {
     public static void computeChunkVerityTreeAndDigest(DataSource dataSource,
             Map<ContentDigestAlgorithm, Pair<byte[], byte[]>> outputHashTreeAndDigests)
             throws IOException, NoSuchAlgorithmException {
-        ByteBuffer encoded = createVerityDigestBuffer();
+        ByteBuffer encoded = createVerityDigestBuffer(false);
         // Use 0s as salt for now.  This also needs to be consistent in the fsverify header for
         // kernel to use.
         VerityTreeBuilder builder = new VerityTreeBuilder(null);
-        ByteBuffer tree = builder.generateVerityTree(dataSource);
+        ByteBuffer tree = builder.generateVerityTree(dataSource, false /* padding */);
         byte[] rootHash = builder.getRootHashFromTree(tree);
         encoded.put(rootHash);
-        encoded.putLong(dataSource.size());
         outputHashTreeAndDigests.put(ContentDigestAlgorithm.VERITY_CHUNKED_SHA256,
                 Pair.of(tree.array(), encoded.array()));
     }
@@ -1280,7 +1281,7 @@ public class ApkSigningBlockUtils {
      * @throws Asn1EncodingException
      */
     public static byte[] generatePkcs7DerEncodedMessage(
-            byte[] signatureBytes, List<X509Certificate> signerCerts,
+            byte[] signatureBytes, ByteBuffer data, List<X509Certificate> signerCerts,
             AlgorithmIdentifier digestAlgorithmId, AlgorithmIdentifier signatureAlgorithmId)
             throws Asn1EncodingException, CertificateEncodingException {
         SignerInfo signerInfo = new SignerInfo();
@@ -1305,8 +1306,9 @@ public class ApkSigningBlockUtils {
         signedData.version = 1;
         signedData.digestAlgorithms = Collections.singletonList(digestAlgorithmId);
         signedData.encapContentInfo = new EncapsulatedContentInfo(Pkcs7Constants.OID_DATA);
+        // If data is not null, data will be embedded as is in the result -- an attached pcsk7
+        signedData.encapContentInfo.content = data;
         signedData.signerInfos = Collections.singletonList(signerInfo);
-
         ContentInfo contentInfo = new ContentInfo();
         contentInfo.contentType = Pkcs7Constants.OID_SIGNED_DATA;
         contentInfo.content = new Asn1OpaqueObject(Asn1DerEncoder.encode(signedData));
