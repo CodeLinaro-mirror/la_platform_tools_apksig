@@ -221,7 +221,7 @@ public interface ApkSignerEngine extends Closeable {
      */
     OutputJarSignatureRequest outputJarEntries()
             throws ApkFormatException, NoSuchAlgorithmException, InvalidKeyException,
-                    SignatureException, IllegalStateException;
+            SignatureException, IllegalStateException;
 
     /**
      * Indicates to this engine that the ZIP sections comprising the output APK have been output.
@@ -259,8 +259,8 @@ public interface ApkSignerEngine extends Closeable {
             DataSource zipEntries,
             DataSource zipCentralDirectory,
             DataSource zipEocd)
-                    throws IOException, ApkFormatException, NoSuchAlgorithmException,
-                            InvalidKeyException, SignatureException, IllegalStateException;
+            throws IOException, ApkFormatException, NoSuchAlgorithmException,
+            InvalidKeyException, SignatureException, IllegalStateException;
 
     /**
      * Indicates to this engine that the ZIP sections comprising the output APK have been output.
@@ -294,8 +294,8 @@ public interface ApkSignerEngine extends Closeable {
             DataSource zipEntries,
             DataSource zipCentralDirectory,
             DataSource zipEocd)
-                    throws IOException, ApkFormatException, NoSuchAlgorithmException,
-                            InvalidKeyException, SignatureException, IllegalStateException;
+            throws IOException, ApkFormatException, NoSuchAlgorithmException,
+            InvalidKeyException, SignatureException, IllegalStateException;
 
     /**
      * Indicates to this engine that the signed APK was output.
@@ -322,6 +322,19 @@ public interface ApkSignerEngine extends Closeable {
      */
     void signV4(DataSource data, File outputFile)
             throws InvalidKeyException, NoSuchAlgorithmException, SignatureException, IOException;
+
+    /**
+     * Checks if the signing configuration provided to the engine is capable of creating a
+     * SourceStamp.
+     */
+    default boolean isEligibleForSourceStamp() {
+        return false;
+    }
+
+    /** Generates the digest of the certificate used to sign the source stamp. */
+    default byte[] generateSourceStampCertificateDigest() throws SignatureException {
+        return new byte[0];
+    }
 
     /**
      * Indicates to this engine that it will no longer be used. Invoking this on an already closed
