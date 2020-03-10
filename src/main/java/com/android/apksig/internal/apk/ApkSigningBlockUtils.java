@@ -45,8 +45,8 @@ import com.android.apksig.util.DataSink;
 import com.android.apksig.util.DataSinks;
 import com.android.apksig.util.DataSource;
 import com.android.apksig.util.DataSources;
-
 import com.android.apksig.util.RunnablesExecutor;
+
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.BufferUnderflowException;
@@ -93,6 +93,7 @@ public class ApkSigningBlockUtils {
           };
     private static final int VERITY_PADDING_BLOCK_ID = 0x42726577;
 
+    public static final int VERSION_SOURCE_STAMP = 0;
     public static final int VERSION_JAR_SIGNATURE_SCHEME = 1;
     public static final int VERSION_APK_SIGNATURE_SCHEME_V2 = 2;
     public static final int VERSION_APK_SIGNATURE_SCHEME_V3 = 3;
@@ -1367,6 +1368,20 @@ public class ApkSigningBlockUtils {
             return false;
         }
 
+        public boolean containsWarnings() {
+            if (!mWarnings.isEmpty()) {
+                return true;
+            }
+            if (!signers.isEmpty()) {
+                for (SignerInfo signer : signers) {
+                    if (signer.containsWarnings()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         public void addError(ApkVerifier.Issue msg, Object... parameters) {
             mErrors.add(new ApkVerifier.IssueWithParams(msg, parameters));
         }
@@ -1409,6 +1424,10 @@ public class ApkSigningBlockUtils {
 
             public boolean containsErrors() {
                 return !mErrors.isEmpty();
+            }
+
+            public boolean containsWarnings() {
+                return !mWarnings.isEmpty();
             }
 
             public List<ApkVerifier.IssueWithParams> getErrors() {

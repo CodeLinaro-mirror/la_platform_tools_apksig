@@ -16,10 +16,14 @@
 
 package com.android.apksig;
 
+import static com.android.apksig.apk.ApkUtils.SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME;
+
 import com.android.apksig.apk.ApkFormatException;
 import com.android.apksig.apk.ApkUtils;
 import com.android.apksig.internal.apk.ApkSigningBlockUtils;
+import com.android.apksig.internal.apk.ContentDigestAlgorithm;
 import com.android.apksig.internal.apk.SignatureAlgorithm;
+import com.android.apksig.internal.apk.stamp.SourceStampSigner;
 import com.android.apksig.internal.apk.v1.DigestAlgorithm;
 import com.android.apksig.internal.apk.v1.V1SchemeSigner;
 import com.android.apksig.internal.apk.v1.V1SchemeVerifier;
@@ -45,6 +49,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.SignatureException;
+import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
@@ -85,6 +90,7 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
     private final boolean mOtherSignersSignaturesPreserved;
     private final String mCreatedBy;
     private final List<SignerConfig> mSignerConfigs;
+    private final SignerConfig mSourceStampSignerConfig;
     private final int mMinSdkVersion;
     private final SigningCertificateLineage mSigningCertificateLineage;
 
@@ -146,6 +152,7 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
 
     private DefaultApkSignerEngine(
             List<SignerConfig> signerConfigs,
+            SignerConfig sourceStampSignerConfig,
             int minSdkVersion,
             boolean v1SigningEnabled,
             boolean v2SigningEnabled,
@@ -173,6 +180,7 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
         mOtherSignersSignaturesPreserved = otherSignersSignaturesPreserved;
         mCreatedBy = createdBy;
         mSignerConfigs = signerConfigs;
+        mSourceStampSignerConfig = sourceStampSignerConfig;
         mMinSdkVersion = minSdkVersion;
         mSigningCertificateLineage = signingCertificateLineage;
 
@@ -359,6 +367,14 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
         return configs.get(0);
     }
 
+    private ApkSigningBlockUtils.SignerConfig createSourceStampSignerConfig()
+            throws InvalidKeyException {
+        return createSigningBlockSignerConfig(
+                mSourceStampSignerConfig,
+                /* apkSigningBlockPaddingSupported= */ true,
+                ApkSigningBlockUtils.VERSION_SOURCE_STAMP);
+    }
+
     private int getMinSdkFromV3SignatureAlgorithms(List<SignatureAlgorithm> algorithms) {
         int min = Integer.MAX_VALUE;
         for (SignatureAlgorithm algorithm : algorithms) {
@@ -426,6 +442,11 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
                 } catch (InvalidKeyException e) {
                     newSignerConfig.signatureAlgorithms = new ArrayList<>();
                 }
+                break;
+            case ApkSigningBlockUtils.VERSION_SOURCE_STAMP:
+                newSignerConfig.signatureAlgorithms =
+                        Collections.singletonList(
+                                SignatureAlgorithm.VERITY_RSA_PKCS1_V1_5_WITH_SHA256);
                 break;
             default:
                 throw new IllegalArgumentException("Unknown APK Signature Scheme ID requested");
@@ -659,6 +680,14 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
             }
             mOutputJarEntryDigests.put(entryName, digestRequest.getDigest());
         }
+        if (isEligibleForSourceStamp()) {
+            MessageDigest messageDigest =
+                    MessageDigest.getInstance(
+                            V1SchemeSigner.getJcaMessageDigestAlgorithm(mV1ContentDigestAlgorithm));
+            messageDigest.update(generateSourceStampCertificateDigest());
+            mOutputJarEntryDigests.put(
+                    SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME, messageDigest.digest());
+        }
         mOutputJarEntryDigestRequests.clear();
 
         for (GetJarEntryDataRequest dataRequest : mOutputSignatureJarEntryDataRequests.values()) {
@@ -679,6 +708,14 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
                 (mInputJarManifestEntryDataRequest != null)
                         ? mInputJarManifestEntryDataRequest.getData()
                         : null;
+        if (isEligibleForSourceStamp()) {
+            inputJarManifest =
+                    V1SchemeSigner.generateManifestFile(
+                                    mV1ContentDigestAlgorithm,
+                                    mOutputJarEntryDigests,
+                                    inputJarManifest)
+                            .contents;
+        }
 
         // Check whether the most recently used signature (if present) is still fine.
         checkOutputApkNotDebuggableIfDebuggableMustBeRejected();
@@ -798,37 +835,50 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
         DataSource eocd = ApkSigningBlockUtils.copyWithModifiedCDOffset(beforeCentralDir, zipEocd);
 
         List<Pair<byte[], Integer>> signingSchemeBlocks = new ArrayList<>();
+        ApkSigningBlockUtils.SigningSchemeBlockAndDigests v2SigningSchemeBlockAndDigests = null;
+        ApkSigningBlockUtils.SigningSchemeBlockAndDigests v3SigningSchemeBlockAndDigests = null;
 
         // create APK Signature Scheme V2 Signature if requested
         if (mV2SigningEnabled) {
             invalidateV2Signature();
             List<ApkSigningBlockUtils.SignerConfig> v2SignerConfigs =
                     createV2SignerConfigs(apkSigningBlockPaddingSupported);
-            signingSchemeBlocks.add(
+            v2SigningSchemeBlockAndDigests =
                     V2SchemeSigner.generateApkSignatureSchemeV2Block(
-                                    mExecutor,
-                                    beforeCentralDir,
-                                    zipCentralDirectory,
-                                    eocd,
-                                    v2SignerConfigs,
-                                    mV3SigningEnabled)
-                            .signingSchemeBlock);
+                            mExecutor,
+                            beforeCentralDir,
+                            zipCentralDirectory,
+                            eocd,
+                            v2SignerConfigs,
+                            mV3SigningEnabled);
+            signingSchemeBlocks.add(v2SigningSchemeBlockAndDigests.signingSchemeBlock);
         }
         if (mV3SigningEnabled) {
             invalidateV3Signature();
             List<ApkSigningBlockUtils.SignerConfig> v3SignerConfigs =
                     createV3SignerConfigs(apkSigningBlockPaddingSupported);
-            signingSchemeBlocks.add(
+            v3SigningSchemeBlockAndDigests =
                     V3SchemeSigner.generateApkSignatureSchemeV3Block(
-                                    mExecutor,
-                                    beforeCentralDir,
-                                    zipCentralDirectory,
-                                    eocd,
-                                    v3SignerConfigs)
-                            .signingSchemeBlock);
+                            mExecutor,
+                            beforeCentralDir,
+                            zipCentralDirectory,
+                            eocd,
+                            v3SignerConfigs);
+            signingSchemeBlocks.add(v3SigningSchemeBlockAndDigests.signingSchemeBlock);
+        }
+        if (isEligibleForSourceStamp()) {
+            ApkSigningBlockUtils.SignerConfig sourceStampSignerConfig =
+                    createSourceStampSignerConfig();
+            Map<ContentDigestAlgorithm, byte[]> digestInfo =
+                    mV3SigningEnabled
+                            ? v3SigningSchemeBlockAndDigests.digestInfo
+                            : v2SigningSchemeBlockAndDigests.digestInfo;
+            signingSchemeBlocks.add(
+                    SourceStampSigner.generateSourceStampBlock(
+                            sourceStampSignerConfig, digestInfo));
         }
 
-        // create APK Signing Block with v2 and/or v3 blocks
+        // create APK Signing Block with v2 and/or v3 and/or SourceStamp blocks
         byte[] apkSigningBlock = ApkSigningBlockUtils.generateApkSigningBlock(signingSchemeBlocks);
 
         mAddSigningBlockRequest =
@@ -853,6 +903,24 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
             V4SchemeSigner.generateV4Signature(dataSource, v4SignerConfig, outputFile);
         } catch (InvalidKeyException | IOException | NoSuchAlgorithmException ignored) {
             // It is okay to fail v4 signing for now.
+        }
+    }
+
+    @Override
+    public boolean isEligibleForSourceStamp() {
+        return mSourceStampSignerConfig != null && (mV2SigningEnabled || mV3SigningEnabled);
+    }
+
+    @Override
+    public byte[] generateSourceStampCertificateDigest() throws SignatureException {
+        if (mSourceStampSignerConfig.getCertificates().isEmpty()) {
+            throw new SignatureException("No certificates configured for stamp");
+        }
+        try {
+            return computeSha256DigestBytes(
+                    mSourceStampSignerConfig.getCertificates().get(0).getEncoded());
+        } catch (CertificateEncodingException e) {
+            throw new SignatureException("Failed to encode source stamp certificate", e);
         }
     }
 
@@ -1013,6 +1081,17 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
             return InputJarEntryInstructions.OutputPolicy.OUTPUT;
         }
         return InputJarEntryInstructions.OutputPolicy.SKIP;
+    }
+
+    private static byte[] computeSha256DigestBytes(byte[] data) {
+        MessageDigest messageDigest;
+        try {
+            messageDigest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not found", e);
+        }
+        messageDigest.update(data);
+        return messageDigest.digest();
     }
 
     private static class OutputJarSignatureRequestImpl implements OutputJarSignatureRequest {
@@ -1333,6 +1412,7 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
     /** Builder of {@link DefaultApkSignerEngine} instances. */
     public static class Builder {
         private List<SignerConfig> mSignerConfigs;
+        private SignerConfig mStampSignerConfig;
         private final int mMinSdkVersion;
 
         private boolean mV1SigningEnabled = true;
@@ -1422,6 +1502,7 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
 
             return new DefaultApkSignerEngine(
                     mSignerConfigs,
+                    mStampSignerConfig,
                     mMinSdkVersion,
                     mV1SigningEnabled,
                     mV2SigningEnabled,
@@ -1430,6 +1511,12 @@ public class DefaultApkSignerEngine implements ApkSignerEngine {
                     mOtherSignersSignaturesPreserved,
                     mCreatedBy,
                     mSigningCertificateLineage);
+        }
+
+        /** Sets the signer configuration for the SourceStamp to be embedded in the APK. */
+        public Builder setStampSignerConfig(SignerConfig stampSignerConfig) {
+            mStampSignerConfig = stampSignerConfig;
+            return this;
         }
 
         /**
