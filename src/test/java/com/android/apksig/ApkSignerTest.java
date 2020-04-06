@@ -16,10 +16,11 @@
 
 package com.android.apksig;
 
-import static com.android.apksig.ApkSigner.SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME;
+import static com.android.apksig.apk.ApkUtils.SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME;
 import static com.android.apksig.apk.ApkUtils.findZipSections;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -30,6 +31,7 @@ import com.android.apksig.apk.ApkFormatException;
 import com.android.apksig.apk.ApkUtils;
 import com.android.apksig.internal.apk.ApkSigningBlockUtils;
 import com.android.apksig.internal.apk.SignatureInfo;
+import com.android.apksig.internal.apk.stamp.SourceStampSigner;
 import com.android.apksig.internal.apk.v1.V1SchemeVerifier;
 import com.android.apksig.internal.apk.v2.V2SchemeSigner;
 import com.android.apksig.internal.apk.v3.V3SchemeSigner;
@@ -43,6 +45,7 @@ import com.android.apksig.util.DataSinks;
 import com.android.apksig.util.DataSource;
 import com.android.apksig.util.DataSources;
 import com.android.apksig.util.ReadableDataSink;
+import com.android.apksig.zip.ZipFormatException;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -763,7 +766,7 @@ public class ApkSignerTest {
                                 new ApkSigner.Builder(signers).setDebuggableApkPermitted(false)));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testV3SigningWithSignersNotInLineageFails() throws Exception {
         // APKs signed with the v3 scheme after a key rotation must specify the lineage containing
         // the proof of rotation. This test verifies that the signing will fail if the provided
@@ -774,7 +777,13 @@ public class ApkSignerTest {
                         getDefaultSignerConfigFromResources(SECOND_RSA_2048_SIGNER_RESOURCE_NAME));
         SigningCertificateLineage lineage =
                 Resources.toSigningCertificateLineage(getClass(), "rsa-1024-lineage-2-signers");
-        sign("original.apk", new ApkSigner.Builder(signers).setSigningCertificateLineage(lineage));
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        sign(
+                                "original.apk",
+                                new ApkSigner.Builder(signers)
+                                        .setSigningCertificateLineage(lineage)));
     }
 
     @Test
@@ -861,7 +870,7 @@ public class ApkSignerTest {
                         .setSigningCertificateLineage(lineage));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testV3SigningWithMultipleSignersAndNoLineageFails() throws Exception {
         // The v3 signing scheme does not support multiple signers; if multiple signers are provided
         // it is assumed these signers are part of the lineage. This test verifies v3 signing
@@ -871,12 +880,15 @@ public class ApkSignerTest {
         ApkSigner.SignerConfig secondSigner =
                 getDefaultSignerConfigFromResources(SECOND_RSA_2048_SIGNER_RESOURCE_NAME);
         List<ApkSigner.SignerConfig> signers = Arrays.asList(firstSigner, secondSigner);
-        sign(
-                "original.apk",
-                new ApkSigner.Builder(signers)
-                        .setV1SigningEnabled(true)
-                        .setV2SigningEnabled(true)
-                        .setV3SigningEnabled(true));
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        sign(
+                                "original.apk",
+                                new ApkSigner.Builder(signers)
+                                        .setV1SigningEnabled(true)
+                                        .setV2SigningEnabled(true)
+                                        .setV3SigningEnabled(true)));
     }
 
     @Test
@@ -943,6 +955,27 @@ public class ApkSignerTest {
     }
 
     @Test
+    public void testV4State_disableV3EnableV4_fails() throws Exception {
+        ApkSigner.SignerConfig signer =
+                getDefaultSignerConfigFromResources(FIRST_RSA_2048_SIGNER_RESOURCE_NAME);
+
+        Exception exception =
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                sign(
+                                        "original.apk",
+                                        new ApkSigner.Builder(Collections.singletonList(signer))
+                                                .setV1SigningEnabled(true)
+                                                .setV2SigningEnabled(true)
+                                                .setV3SigningEnabled(false)
+                                                .setV4SigningEnabled(true)));
+        assertEquals(
+                "Builder configured to both enable and disable APK Signature Scheme v3/v4 signing",
+                exception.getMessage());
+    }
+
+    @Test
     public void testSignApk_stampFile() throws Exception {
         List<ApkSigner.SignerConfig> signers =
                 Collections.singletonList(
@@ -963,19 +996,121 @@ public class ApkSignerTest {
         ApkUtils.ZipSections zipSections = findZipSections(signedApk);
         List<CentralDirectoryRecord> cdRecords =
                 V1SchemeVerifier.parseZipCentralDirectory(signedApk, zipSections);
-        CentralDirectoryRecord stampCdRecord =
-                cdRecords.stream()
-                        .filter(
-                                cdRecord ->
-                                        SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME.equals(
-                                                cdRecord.getName()))
-                        .findAny()
-                        .orElse(null);
+        CentralDirectoryRecord stampCdRecord = null;
+        for (CentralDirectoryRecord cdRecord : cdRecords) {
+            if (SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME.equals(cdRecord.getName())) {
+                stampCdRecord = cdRecord;
+                break;
+            }
+        }
         assertNotNull(stampCdRecord);
         byte[] actualStampCertificateDigest =
                 LocalFileRecord.getUncompressedData(
                         signedApk, stampCdRecord, zipSections.getZipCentralDirectoryOffset());
         assertArrayEquals(expectedStampCertificateDigest, actualStampCertificateDigest);
+    }
+
+    @Test
+    public void testSignApk_stampBlock_noStampGenerated() throws Exception {
+        List<ApkSigner.SignerConfig> signersList =
+                Collections.singletonList(
+                        getDefaultSignerConfigFromResources(FIRST_RSA_2048_SIGNER_RESOURCE_NAME));
+
+        DataSource signedApk =
+                sign(
+                        "original.apk",
+                        new ApkSigner.Builder(signersList)
+                                .setV1SigningEnabled(true)
+                                .setV2SigningEnabled(true)
+                                .setV3SigningEnabled(true));
+
+        ApkUtils.ZipSections zipSections = ApkUtils.findZipSections(signedApk);
+        ApkSigningBlockUtils.Result result =
+                new ApkSigningBlockUtils.Result(ApkSigningBlockUtils.VERSION_SOURCE_STAMP);
+        assertThrows(
+                ApkSigningBlockUtils.SignatureNotFoundException.class,
+                () ->
+                        ApkSigningBlockUtils.findSignature(
+                                signedApk,
+                                zipSections,
+                                ApkSigningBlockUtils.VERSION_SOURCE_STAMP,
+                                result));
+    }
+
+    @Test
+    public void testSignApk_stampBlock_whenNoV2V3SignaturePresent() throws Exception {
+        List<ApkSigner.SignerConfig> signersList =
+                Collections.singletonList(
+                        getDefaultSignerConfigFromResources(FIRST_RSA_2048_SIGNER_RESOURCE_NAME));
+        ApkSigner.SignerConfig sourceStampSigner =
+                getDefaultSignerConfigFromResources(SECOND_RSA_2048_SIGNER_RESOURCE_NAME);
+
+        DataSource signedApk =
+                sign(
+                        "original.apk",
+                        new ApkSigner.Builder(signersList)
+                                .setV1SigningEnabled(true)
+                                .setSourceStampSignerConfig(sourceStampSigner));
+
+        ApkUtils.ZipSections zipSections = ApkUtils.findZipSections(signedApk);
+        ApkSigningBlockUtils.Result result =
+                new ApkSigningBlockUtils.Result(ApkSigningBlockUtils.VERSION_SOURCE_STAMP);
+        assertThrows(
+                ApkSigningBlockUtils.SignatureNotFoundException.class,
+                () ->
+                        ApkSigningBlockUtils.findSignature(
+                                signedApk,
+                                zipSections,
+                                ApkSigningBlockUtils.VERSION_SOURCE_STAMP,
+                                result));
+    }
+
+    @Test
+    public void testSignApk_stampBlock_whenV2SignaturePresent() throws Exception {
+        List<ApkSigner.SignerConfig> signersList =
+                Collections.singletonList(
+                        getDefaultSignerConfigFromResources(FIRST_RSA_2048_SIGNER_RESOURCE_NAME));
+        ApkSigner.SignerConfig sourceStampSigner =
+                getDefaultSignerConfigFromResources(SECOND_RSA_2048_SIGNER_RESOURCE_NAME);
+
+        DataSource signedApk =
+                sign(
+                        "original.apk",
+                        new ApkSigner.Builder(signersList)
+                                .setV1SigningEnabled(true)
+                                .setV2SigningEnabled(true)
+                                .setSourceStampSignerConfig(sourceStampSigner));
+
+        SignatureInfo signatureInfo =
+                getSignatureInfoFromApk(
+                        signedApk,
+                        ApkSigningBlockUtils.VERSION_SOURCE_STAMP,
+                        SourceStampSigner.SOURCE_STAMP_BLOCK_ID);
+        assertNotNull(signatureInfo.signatureBlock);
+    }
+
+    @Test
+    public void testSignApk_stampBlock_whenV3SignaturePresent() throws Exception {
+        List<ApkSigner.SignerConfig> signersList =
+                Collections.singletonList(
+                        getDefaultSignerConfigFromResources(FIRST_RSA_2048_SIGNER_RESOURCE_NAME));
+        ApkSigner.SignerConfig sourceStampSigner =
+                getDefaultSignerConfigFromResources(SECOND_RSA_2048_SIGNER_RESOURCE_NAME);
+
+        DataSource signedApk =
+                sign(
+                        "original.apk",
+                        new ApkSigner.Builder(signersList)
+                                .setV1SigningEnabled(true)
+                                .setV3SigningEnabled(true)
+                                .setSourceStampSignerConfig(sourceStampSigner));
+
+        SignatureInfo signatureInfo =
+                getSignatureInfoFromApk(
+                        signedApk,
+                        ApkSigningBlockUtils.VERSION_SOURCE_STAMP,
+                        SourceStampSigner.SOURCE_STAMP_BLOCK_ID);
+        assertNotNull(signatureInfo.signatureBlock);
     }
 
     private RSAPublicKey getRSAPublicKeyFromSigningBlock(DataSource apk, int signatureVersionId)
@@ -992,11 +1127,8 @@ public class ApkSignerTest {
                 throw new Exception(
                         "Invalid signature version ID specified: " + signatureVersionId);
         }
-        ApkUtils.ZipSections zipSections = ApkUtils.findZipSections(apk);
-        ApkSigningBlockUtils.Result result = new ApkSigningBlockUtils.Result(signatureVersionId);
         SignatureInfo signatureInfo =
-                ApkSigningBlockUtils.findSignature(
-                        apk, zipSections, signatureVersionBlockId, result);
+                getSignatureInfoFromApk(apk, signatureVersionId, signatureVersionBlockId);
         // FORMAT:
         // * length prefixed sequence of length prefixed signers
         //   * length-prefixed signed data
@@ -1024,8 +1156,17 @@ public class ApkSignerTest {
         // byte indicating the number of padding bits in the public key. Read this first byte to
         // allow parsing the rest of the RSAPublicKey as a sequence.
         subjectPublicKeyBuffer.get();
-        RSAPublicKey rsaPublicKey = Asn1BerParser.parse(subjectPublicKeyBuffer, RSAPublicKey.class);
-        return rsaPublicKey;
+        return Asn1BerParser.parse(subjectPublicKeyBuffer, RSAPublicKey.class);
+    }
+
+    private static SignatureInfo getSignatureInfoFromApk(
+            DataSource apk, int signatureVersionId, int signatureVersionBlockId)
+            throws IOException, ZipFormatException,
+                    ApkSigningBlockUtils.SignatureNotFoundException {
+        ApkUtils.ZipSections zipSections = ApkUtils.findZipSections(apk);
+        ApkSigningBlockUtils.Result result = new ApkSigningBlockUtils.Result(signatureVersionId);
+        return ApkSigningBlockUtils.findSignature(
+                apk, zipSections, signatureVersionBlockId, result);
     }
 
     /**

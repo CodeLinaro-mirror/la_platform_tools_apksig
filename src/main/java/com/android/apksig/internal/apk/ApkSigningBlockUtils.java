@@ -45,8 +45,8 @@ import com.android.apksig.util.DataSink;
 import com.android.apksig.util.DataSinks;
 import com.android.apksig.util.DataSource;
 import com.android.apksig.util.DataSources;
-
 import com.android.apksig.util.RunnablesExecutor;
+
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.BufferUnderflowException;
@@ -93,6 +93,7 @@ public class ApkSigningBlockUtils {
           };
     private static final int VERITY_PADDING_BLOCK_ID = 0x42726577;
 
+    public static final int VERSION_SOURCE_STAMP = 0;
     public static final int VERSION_JAR_SIGNATURE_SCHEME = 1;
     public static final int VERSION_APK_SIGNATURE_SCHEME_V2 = 2;
     public static final int VERSION_APK_SIGNATURE_SCHEME_V3 = 3;
@@ -430,10 +431,13 @@ public class ApkSigningBlockUtils {
             DataSource centralDir,
             DataSource eocd) throws IOException, NoSuchAlgorithmException, DigestException {
         Map<ContentDigestAlgorithm, byte[]> contentDigests = new HashMap<>();
-        Set<ContentDigestAlgorithm> oneMbChunkBasedAlgorithm = digestAlgorithms.stream()
-                .filter(a -> a == ContentDigestAlgorithm.CHUNKED_SHA256 ||
-                             a == ContentDigestAlgorithm.CHUNKED_SHA512)
-                .collect(Collectors.toSet());
+        Set<ContentDigestAlgorithm> oneMbChunkBasedAlgorithm = new HashSet<>();
+        for (ContentDigestAlgorithm digestAlgorithm : digestAlgorithms) {
+            if (digestAlgorithm == ContentDigestAlgorithm.CHUNKED_SHA256
+                    || digestAlgorithm == ContentDigestAlgorithm.CHUNKED_SHA512) {
+                oneMbChunkBasedAlgorithm.add(digestAlgorithm);
+            }
+        }
         computeOneMbChunkContentDigests(
                 executor,
                 oneMbChunkBasedAlgorithm,
@@ -697,7 +701,7 @@ public class ApkSigningBlockUtils {
                                     i));
                 }
                 chunkCounts[i] = (int)chunkCount;
-                totalChunkCount += chunkCount;
+                totalChunkCount = (int) (totalChunkCount + chunkCount);
             }
             this.totalChunkCount = totalChunkCount;
             nextIndex = new AtomicInteger(0);
@@ -1181,10 +1185,12 @@ public class ApkSigningBlockUtils {
         if (bestSigAlgorithmOnSdkVersion.isEmpty()) {
             throw new NoSupportedSignaturesException("No supported signature");
         }
-        return bestSigAlgorithmOnSdkVersion.values().stream()
-                .sorted((sig1, sig2) -> Integer.compare(
-                        sig1.algorithm.getId(), sig2.algorithm.getId()))
-                .collect(Collectors.toList());
+        List<SupportedSignature> signaturesToVerify =
+                new ArrayList<>(bestSigAlgorithmOnSdkVersion.values());
+        Collections.sort(
+                signaturesToVerify,
+                (sig1, sig2) -> Integer.compare(sig1.algorithm.getId(), sig2.algorithm.getId()));
+        return signaturesToVerify;
     }
 
     public static class NoSupportedSignaturesException extends Exception {
@@ -1278,7 +1284,7 @@ public class ApkSigningBlockUtils {
      *     //       signatureAlgorithm
      *     //       signature
      *
-     * @throws Asn1EncodingException
+     * @throws Asn1EncodingException if the ASN.1 structure could not be encoded
      */
     public static byte[] generatePkcs7DerEncodedMessage(
             byte[] signatureBytes, ByteBuffer data, List<X509Certificate> signerCerts,
@@ -1344,7 +1350,7 @@ public class ApkSigningBlockUtils {
         /** Whether the APK's APK Signature Scheme signature verifies. */
         public boolean verified;
 
-        public final List<SignerInfo> signers = new ArrayList<>();
+        public final List<Result.SignerInfo> signers = new ArrayList<>();
         public SigningCertificateLineage signingCertificateLineage = null;
         private final List<ApkVerifier.IssueWithParams> mWarnings = new ArrayList<>();
         private final List<ApkVerifier.IssueWithParams> mErrors = new ArrayList<>();
@@ -1358,8 +1364,22 @@ public class ApkSigningBlockUtils {
                 return true;
             }
             if (!signers.isEmpty()) {
-                for (SignerInfo signer : signers) {
+                for (Result.SignerInfo signer : signers) {
                     if (signer.containsErrors()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        public boolean containsWarnings() {
+            if (!mWarnings.isEmpty()) {
+                return true;
+            }
+            if (!signers.isEmpty()) {
+                for (Result.SignerInfo signer : signers) {
+                    if (signer.containsWarnings()) {
                         return true;
                     }
                 }
@@ -1409,6 +1429,10 @@ public class ApkSigningBlockUtils {
 
             public boolean containsErrors() {
                 return !mErrors.isEmpty();
+            }
+
+            public boolean containsWarnings() {
+                return !mWarnings.isEmpty();
             }
 
             public List<ApkVerifier.IssueWithParams> getErrors() {
