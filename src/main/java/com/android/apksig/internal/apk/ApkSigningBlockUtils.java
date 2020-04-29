@@ -16,6 +16,10 @@
 
 package com.android.apksig.internal.apk;
 
+import static com.android.apksig.internal.apk.ContentDigestAlgorithm.CHUNKED_SHA256;
+import static com.android.apksig.internal.apk.ContentDigestAlgorithm.CHUNKED_SHA512;
+import static com.android.apksig.internal.apk.ContentDigestAlgorithm.VERITY_CHUNKED_SHA256;
+
 import com.android.apksig.ApkVerifier;
 import com.android.apksig.SigningCertificateLineage;
 import com.android.apksig.apk.ApkFormatException;
@@ -77,7 +81,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 import javax.security.auth.x500.X500Principal;
 
@@ -92,6 +95,9 @@ public class ApkSigningBlockUtils {
               0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x20, 0x34, 0x32,
           };
     private static final int VERITY_PADDING_BLOCK_ID = 0x42726577;
+
+    private static final ContentDigestAlgorithm[] V4_CONTENT_DIGEST_ALGORITHMS =
+            {CHUNKED_SHA512, VERITY_CHUNKED_SHA256, CHUNKED_SHA256};
 
     public static final int VERSION_SOURCE_STAMP = 0;
     public static final int VERSION_JAR_SIGNATURE_SCHEME = 1;
@@ -204,7 +210,7 @@ public class ApkSigningBlockUtils {
                             centralDir,
                             new ByteBufferDataSource(modifiedEocd));
             // Special checks for the verity algorithm requirements.
-            if (actualContentDigests.containsKey(ContentDigestAlgorithm.VERITY_CHUNKED_SHA256)) {
+            if (actualContentDigests.containsKey(VERITY_CHUNKED_SHA256)) {
                 if ((beforeApkSigningBlock.size() % ANDROID_COMMON_PAGE_ALIGNMENT_BYTES != 0)) {
                     throw new RuntimeException(
                             "APK Signing Block is not aligned on 4k boundary: " +
@@ -444,7 +450,7 @@ public class ApkSigningBlockUtils {
                 new DataSource[] { beforeCentralDir, centralDir, eocd },
                 contentDigests);
 
-        if (digestAlgorithms.contains(ContentDigestAlgorithm.VERITY_CHUNKED_SHA256)) {
+        if (digestAlgorithms.contains(VERITY_CHUNKED_SHA256)) {
             computeApkVerityDigest(beforeCentralDir, centralDir, eocd, contentDigests);
         }
         return contentDigests;
@@ -765,16 +771,16 @@ public class ApkSigningBlockUtils {
         byte[] rootHash = builder.generateVerityTreeRootHash(beforeCentralDir, centralDir, eocd);
         encoded.put(rootHash);
         encoded.putLong(beforeCentralDir.size() + centralDir.size() + eocd.size());
-        outputContentDigests.put(ContentDigestAlgorithm.VERITY_CHUNKED_SHA256, encoded.array());
+        outputContentDigests.put(VERITY_CHUNKED_SHA256, encoded.array());
     }
 
     private static ByteBuffer createVerityDigestBuffer(boolean includeSourceDataSize) {
         // FORMAT:
         // OFFSET       DATA TYPE  DESCRIPTION
         // * @+0  bytes uint8[32]  Merkle tree root hash of SHA-256
-        // * @+32 bytes int64      Length of source data (Optional)
+        // * @+32 bytes int64      (optional) Length of source data
         int backBufferSize =
-                ContentDigestAlgorithm.VERITY_CHUNKED_SHA256.getChunkDigestOutputSizeBytes();
+                VERITY_CHUNKED_SHA256.getChunkDigestOutputSizeBytes();
         if (includeSourceDataSize) {
             backBufferSize += Long.SIZE / Byte.SIZE;
         }
@@ -783,18 +789,29 @@ public class ApkSigningBlockUtils {
         return encoded;
     }
 
-    public static void computeChunkVerityTreeAndDigest(DataSource dataSource,
-            Map<ContentDigestAlgorithm, Pair<byte[], byte[]>> outputHashTreeAndDigests)
+    public static class VerityTreeAndDigest {
+        public final ContentDigestAlgorithm contentDigestAlgorithm;
+        public final byte[] rootHash;
+        public final byte[] tree;
+
+        VerityTreeAndDigest(ContentDigestAlgorithm contentDigestAlgorithm, byte[] rootHash,
+                byte[] tree) {
+            this.contentDigestAlgorithm = contentDigestAlgorithm;
+            this.rootHash = rootHash;
+            this.tree = tree;
+        }
+    }
+
+    public static VerityTreeAndDigest computeChunkVerityTreeAndDigest(DataSource dataSource)
             throws IOException, NoSuchAlgorithmException {
         ByteBuffer encoded = createVerityDigestBuffer(false);
         // Use 0s as salt for now.  This also needs to be consistent in the fsverify header for
         // kernel to use.
         VerityTreeBuilder builder = new VerityTreeBuilder(null);
-        ByteBuffer tree = builder.generateVerityTree(dataSource, false /* padding */);
+        ByteBuffer tree = builder.generateVerityTree(dataSource);
         byte[] rootHash = builder.getRootHashFromTree(tree);
         encoded.put(rootHash);
-        outputHashTreeAndDigests.put(ContentDigestAlgorithm.VERITY_CHUNKED_SHA256,
-                Pair.of(tree.array(), encoded.array()));
+        return new VerityTreeAndDigest(VERITY_CHUNKED_SHA256, encoded.array(), tree.array());
     }
 
     private static long getChunkCount(long inputSize, long chunkSize) {
@@ -1180,7 +1197,7 @@ public class ApkSigningBlockUtils {
         if (minSdkVersion < minProvidedSignaturesVersion) {
             throw new NoSupportedSignaturesException(
                     "Minimum provided signature version " + minProvidedSignaturesVersion +
-                    " < minSdkVersion " + minSdkVersion);
+                    " > minSdkVersion " + minSdkVersion);
         }
         if (bestSigAlgorithmOnSdkVersion.isEmpty()) {
             throw new NoSupportedSignaturesException("No supported signature");
@@ -1319,6 +1336,20 @@ public class ApkSigningBlockUtils {
         contentInfo.contentType = Pkcs7Constants.OID_SIGNED_DATA;
         contentInfo.content = new Asn1OpaqueObject(Asn1DerEncoder.encode(signedData));
         return Asn1DerEncoder.encode(contentInfo);
+    }
+
+    /**
+     * Picks the correct v2/v3 digest for v4 signature verification.
+     *
+     * Keep in sync with pickBestDigestForV4 in framework's ApkSigningBlockUtils.
+     */
+    public static byte[] pickBestDigestForV4(Map<ContentDigestAlgorithm, byte[]> contentDigests) {
+        for (ContentDigestAlgorithm algo : V4_CONTENT_DIGEST_ALGORITHMS) {
+            if (contentDigests.containsKey(algo)) {
+                return contentDigests.get(algo);
+            }
+        }
+        return null;
     }
 
     /**
