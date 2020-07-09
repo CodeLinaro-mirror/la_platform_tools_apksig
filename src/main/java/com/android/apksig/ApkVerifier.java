@@ -17,6 +17,11 @@
 package com.android.apksig;
 
 import static com.android.apksig.apk.ApkUtils.SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME;
+import static com.android.apksig.apk.ApkUtils.computeSha256DigestBytes;
+import static com.android.apksig.internal.apk.ApkSigningBlockUtils.VERSION_APK_SIGNATURE_SCHEME_V2;
+import static com.android.apksig.internal.apk.ApkSigningBlockUtils.VERSION_APK_SIGNATURE_SCHEME_V3;
+import static com.android.apksig.internal.apk.ApkSigningBlockUtils.VERSION_JAR_SIGNATURE_SCHEME;
+import static com.android.apksig.internal.apk.v1.V1SchemeSigner.MANIFEST_ENTRY_NAME;
 
 import com.android.apksig.apk.ApkFormatException;
 import com.android.apksig.apk.ApkUtils;
@@ -24,7 +29,7 @@ import com.android.apksig.internal.apk.AndroidBinXmlParser;
 import com.android.apksig.internal.apk.ApkSigningBlockUtils;
 import com.android.apksig.internal.apk.ContentDigestAlgorithm;
 import com.android.apksig.internal.apk.SignatureAlgorithm;
-import com.android.apksig.internal.apk.stamp.SourceStampVerifier;
+import com.android.apksig.internal.apk.stamp.V2SourceStampVerifier;
 import com.android.apksig.internal.apk.v1.V1SchemeVerifier;
 import com.android.apksig.internal.apk.v2.V2SchemeVerifier;
 import com.android.apksig.internal.apk.v3.V3SchemeVerifier;
@@ -195,7 +200,8 @@ public class ApkVerifier {
         }
 
         Result result = new Result();
-        Map<ContentDigestAlgorithm, byte[]> apkContentDigests = new HashMap<>();
+        Map<Integer, Map<ContentDigestAlgorithm, byte[]>> signatureSchemeApkContentDigests =
+                new HashMap<>();
 
         // The SUPPORTED_APK_SIG_SCHEME_NAMES contains the mapping from version number to scheme
         // name, but the verifiers use this parameter as the schemes supported by the target SDK
@@ -235,10 +241,9 @@ public class ApkVerifier {
                                     maxSdkVersion);
                     foundApkSigSchemeIds.add(ApkSigningBlockUtils.VERSION_APK_SIGNATURE_SCHEME_V3);
                     result.mergeFrom(v3Result);
-                    if (apkContentDigests.isEmpty()) {
-                        apkContentDigests.putAll(
-                                getApkContentDigestsFromSigningSchemeResult(v3Result));
-                    }
+                    signatureSchemeApkContentDigests.put(
+                            ApkSigningBlockUtils.VERSION_APK_SIGNATURE_SCHEME_V3,
+                            getApkContentDigestsFromSigningSchemeResult(v3Result));
                 } catch (ApkSigningBlockUtils.SignatureNotFoundException ignored) {
                     // v3 signature not required
                 }
@@ -264,52 +269,11 @@ public class ApkVerifier {
                                     maxSdkVersion);
                     foundApkSigSchemeIds.add(ApkSigningBlockUtils.VERSION_APK_SIGNATURE_SCHEME_V2);
                     result.mergeFrom(v2Result);
-                    if (apkContentDigests.isEmpty()) {
-                        apkContentDigests.putAll(
-                                getApkContentDigestsFromSigningSchemeResult(v2Result));
-                    }
+                    signatureSchemeApkContentDigests.put(
+                            ApkSigningBlockUtils.VERSION_APK_SIGNATURE_SCHEME_V2,
+                            getApkContentDigestsFromSigningSchemeResult(v2Result));
                 } catch (ApkSigningBlockUtils.SignatureNotFoundException ignored) {
                     // v2 signature not required
-                }
-                if (result.containsErrors()) {
-                    return result;
-                }
-            }
-
-            if (maxSdkVersion >= AndroidSdkVersion.R) {
-                try {
-                    List<CentralDirectoryRecord> cdRecords =
-                            V1SchemeVerifier.parseZipCentralDirectory(apk, zipSections);
-                    CentralDirectoryRecord sourceStampCdRecord = null;
-                    for (CentralDirectoryRecord cdRecord : cdRecords) {
-                        if (SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME.equals(
-                                cdRecord.getName())) {
-                            sourceStampCdRecord = cdRecord;
-                            break;
-                        }
-                    }
-                    // If SourceStamp file is found inside the APK, there must be a SourceStamp
-                    // block in the APK signing block as well.
-                    if (sourceStampCdRecord != null) {
-                        byte[] sourceStampCertificateDigest =
-                                LocalFileRecord.getUncompressedData(
-                                        apk,
-                                        sourceStampCdRecord,
-                                        zipSections.getZipCentralDirectoryOffset());
-                        ApkSigningBlockUtils.Result sourceStampResult =
-                                SourceStampVerifier.verify(
-                                        apk,
-                                        zipSections,
-                                        sourceStampCertificateDigest,
-                                        apkContentDigests,
-                                        Math.max(minSdkVersion, AndroidSdkVersion.R),
-                                        maxSdkVersion);
-                        result.mergeFrom(sourceStampResult);
-                    }
-                } catch (ApkSigningBlockUtils.SignatureNotFoundException ignored) {
-                    result.addWarning(Issue.SOURCE_STAMP_SIG_MISSING);
-                } catch (ZipFormatException e) {
-                    throw new ApkFormatException("Failed to read APK", e);
                 }
                 if (result.containsErrors()) {
                     return result;
@@ -346,6 +310,9 @@ public class ApkVerifier {
             }
         }
 
+        List<CentralDirectoryRecord> cdRecords =
+                V1SchemeVerifier.parseZipCentralDirectory(apk, zipSections);
+
         // Attempt to verify the APK using JAR signing if necessary. Platforms prior to Android N
         // ignore APK Signature Scheme v2 signatures and always attempt to verify JAR signatures.
         // Android N onwards verifies JAR signatures only if no APK Signature Scheme v2 (or newer
@@ -360,6 +327,46 @@ public class ApkVerifier {
                             minSdkVersion,
                             maxSdkVersion);
             result.mergeFrom(v1Result);
+            signatureSchemeApkContentDigests.put(
+                    ApkSigningBlockUtils.VERSION_JAR_SIGNATURE_SCHEME,
+                    getApkContentDigestFromV1SigningScheme(cdRecords, apk, zipSections));
+        }
+        if (result.containsErrors()) {
+            return result;
+        }
+
+        // Verify the SourceStamp, if found in the APK.
+        try {
+            CentralDirectoryRecord sourceStampCdRecord = null;
+            for (CentralDirectoryRecord cdRecord : cdRecords) {
+                if (SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME.equals(
+                        cdRecord.getName())) {
+                    sourceStampCdRecord = cdRecord;
+                    break;
+                }
+            }
+            // If SourceStamp file is found inside the APK, there must be a SourceStamp
+            // block in the APK signing block as well.
+            if (sourceStampCdRecord != null) {
+                byte[] sourceStampCertificateDigest =
+                        LocalFileRecord.getUncompressedData(
+                                apk,
+                                sourceStampCdRecord,
+                                zipSections.getZipCentralDirectoryOffset());
+                ApkSigningBlockUtils.Result sourceStampResult =
+                        V2SourceStampVerifier.verify(
+                                apk,
+                                zipSections,
+                                sourceStampCertificateDigest,
+                                signatureSchemeApkContentDigests,
+                                Math.max(minSdkVersion, AndroidSdkVersion.R),
+                                maxSdkVersion);
+                result.mergeFrom(sourceStampResult);
+            }
+        } catch (ApkSigningBlockUtils.SignatureNotFoundException ignored) {
+            result.addWarning(Issue.SOURCE_STAMP_SIG_MISSING);
+        } catch (ZipFormatException e) {
+            throw new ApkFormatException("Failed to read APK", e);
         }
         if (result.containsErrors()) {
             return result;
@@ -521,6 +528,34 @@ public class ApkVerifier {
             }
         }
 
+        // If the targetSdkVersion has a minimum required signature scheme version then verify
+        // that the APK was signed with at least that version.
+        if (androidManifest == null) {
+            androidManifest = getAndroidManifestFromApk(apk, zipSections);
+        }
+        int targetSdkVersion = getTargetSdkVersionFromBinaryAndroidManifest(
+                androidManifest.slice());
+        int minSchemeVersion = getMinimumSignatureSchemeVersionForTargetSdk(targetSdkVersion);
+        // The platform currently only enforces a single minimum signature scheme version, but when
+        // later platform versions support another minimum version this will need to be expanded to
+        // verify the minimum based on the target and maximum SDK version.
+        if (minSchemeVersion > VERSION_JAR_SIGNATURE_SCHEME && maxSdkVersion >= targetSdkVersion) {
+            switch(minSchemeVersion) {
+                case VERSION_APK_SIGNATURE_SCHEME_V2:
+                    if (result.isVerifiedUsingV2Scheme()) {
+                        break;
+                    }
+                    // Allow this case to fall through to the next as a signature satisfying a later
+                    // scheme version will also satisfy this requirement.
+                case VERSION_APK_SIGNATURE_SCHEME_V3:
+                    if (result.isVerifiedUsingV3Scheme()) {
+                        break;
+                    }
+                    result.addError(Issue.MIN_SIG_SCHEME_FOR_TARGET_SDK_NOT_MET, targetSdkVersion,
+                            minSchemeVersion);
+            }
+        }
+
         if (result.containsErrors()) {
             return result;
         }
@@ -573,6 +608,37 @@ public class ApkVerifier {
         return apkContentDigests;
     }
 
+    private static Map<ContentDigestAlgorithm, byte[]> getApkContentDigestFromV1SigningScheme(
+            List<CentralDirectoryRecord> cdRecords,
+            DataSource apk,
+            ApkUtils.ZipSections zipSections)
+            throws IOException, ApkFormatException {
+        CentralDirectoryRecord manifestCdRecord = null;
+        Map<ContentDigestAlgorithm, byte[]> v1ContentDigest = new HashMap<>();
+        for (CentralDirectoryRecord cdRecord : cdRecords) {
+            if (MANIFEST_ENTRY_NAME.equals(cdRecord.getName())) {
+                manifestCdRecord = cdRecord;
+                break;
+            }
+        }
+        if (manifestCdRecord == null) {
+            // No JAR signing manifest file found. For SourceStamp verification, returning an empty
+            // digest is enough since this would affect the final digest signed by the stamp, and
+            // thus an empty digest will invalidate that signature.
+            return v1ContentDigest;
+        }
+        try {
+            byte[] manifestBytes =
+                    LocalFileRecord.getUncompressedData(
+                            apk, manifestCdRecord, zipSections.getZipCentralDirectoryOffset());
+            v1ContentDigest.put(
+                    ContentDigestAlgorithm.SHA256, computeSha256DigestBytes(manifestBytes));
+            return v1ContentDigest;
+        } catch (ZipFormatException e) {
+            throw new ApkFormatException("Failed to read APK", e);
+        }
+    }
+
     private static void collectApkContentDigests(List<ApkSigningBlockUtils.Result.SignerInfo.ContentDigest> contentDigests, Map<ContentDigestAlgorithm, byte[]> apkContentDigests) {
         for (ApkSigningBlockUtils.Result.SignerInfo.ContentDigest contentDigest : contentDigests) {
             SignatureAlgorithm signatureAlgorithm =
@@ -606,6 +672,15 @@ public class ApkVerifier {
      * AndroidManifest.xml.
      */
     private static final int TARGET_SANDBOX_VERSION_ATTR_ID = 0x0101054c;
+    private static final String TARGET_SANDBOX_VERSION_ELEMENT_NAME = "manifest";
+
+    /**
+     * Android resource ID of the {@code android:targetSdkVersion} attribute in
+     * AndroidManifest.xml.
+     */
+    private static final int MIN_SDK_VERSION_ATTR_ID = 0x0101020c;
+    private static final int TARGET_SDK_VERSION_ATTR_ID = 0x01010270;
+    private static final String USES_SDK_ELEMENT_NAME = "uses-sdk";
 
     /**
      * Returns the security sandbox version targeted by an APK with the provided
@@ -618,21 +693,61 @@ public class ApkVerifier {
      */
     private static int getTargetSandboxVersionFromBinaryAndroidManifest(
             ByteBuffer androidManifestContents) throws ApkFormatException {
-        // Return the value of the android:targetSandboxVersion attribute of the top-level manifest
-        // element
+        return getAttributeValueFromBinaryAndroidManifest(androidManifestContents,
+                TARGET_SANDBOX_VERSION_ELEMENT_NAME, TARGET_SANDBOX_VERSION_ATTR_ID);
+    }
+
+    /**
+     * Returns the SDK version targeted by an APK with the provided {@code AndroidManifest.xml}.
+     *
+     * @param androidManifestContents contents of {@code AndroidManifest.xml} in binary Android
+     *                                resource format
+     * @throws ApkFormatException if an error occurred while determining the version
+     */
+    private static int getTargetSdkVersionFromBinaryAndroidManifest(
+            ByteBuffer androidManifestContents) {
+        // If the targetSdkVersion is not specified then the platform will use the value of the
+        // minSdkVersion; if neither is specified then the platform will use a value of 1.
+        int minSdkVersion = 1;
+        try {
+            return getAttributeValueFromBinaryAndroidManifest(androidManifestContents,
+                    USES_SDK_ELEMENT_NAME, TARGET_SDK_VERSION_ATTR_ID);
+        } catch (ApkFormatException e) {
+            // Expected if the APK does not contain a targetSdkVersion attribute or the uses-sdk
+            // element is not specified at all.
+        }
+        androidManifestContents.rewind();
+        try {
+            minSdkVersion = getAttributeValueFromBinaryAndroidManifest(androidManifestContents,
+                    USES_SDK_ELEMENT_NAME, MIN_SDK_VERSION_ATTR_ID);
+        } catch (ApkFormatException e) {
+            // Similar to above, expected if the APK does not contain a minSdkVersion attribute or
+            // the uses-sdk element is not specified at all.
+        }
+        return minSdkVersion;
+    }
+
+    /**
+     * Returns the integer value of the requested {@code attributeId} in the specified {@code
+     * elementName} from the provided {@code androidManifestContents} in binary Android resource
+     * format.
+     *
+     * @throws ApkFormatException if an error occurred while attempting to obtain the attribute
+     */
+    private static int getAttributeValueFromBinaryAndroidManifest(
+            ByteBuffer androidManifestContents, String elementName, int attributeId)
+            throws ApkFormatException {
+        // Return the value of the requested attribute from the specified element.
         try {
             AndroidBinXmlParser parser = new AndroidBinXmlParser(androidManifestContents);
             int eventType = parser.getEventType();
             while (eventType != AndroidBinXmlParser.EVENT_END_DOCUMENT) {
                 if ((eventType == AndroidBinXmlParser.EVENT_START_ELEMENT)
-                        && (parser.getDepth() == 1)
-                        && ("manifest".equals(parser.getName()))
+                        && (elementName.equals(parser.getName()))
                         && (parser.getNamespace().isEmpty())) {
-                    // In each manifest element, targetSandboxVersion defaults to 1
                     int result = 1;
                     for (int i = 0; i < parser.getAttributeCount(); i++) {
-                        if (parser.getAttributeNameResourceId(i)
-                                == TARGET_SANDBOX_VERSION_ATTR_ID) {
+                        if (parser.getAttributeNameResourceId(i) == attributeId) {
                             int valueType = parser.getAttributeValueType(i);
                             switch (valueType) {
                                 case AndroidBinXmlParser.VALUE_TYPE_INT:
@@ -640,10 +755,11 @@ public class ApkVerifier {
                                     break;
                                 default:
                                     throw new ApkFormatException(
-                                            "Failed to determine APK's target sandbox version"
+                                            "Failed to determine APK's "
+                                                    + elementName + " attribute"
                                                     + ": unsupported value type of"
-                                                    + " AndroidManifest.xml"
-                                                    + " android:targetSandboxVersion"
+                                                    + " AndroidManifest.xml "
+                                                    + String.format("0x%08X", attributeId)
                                                     + ". Only integer values supported.");
                             }
                             break;
@@ -654,14 +770,22 @@ public class ApkVerifier {
                 eventType = parser.next();
             }
             throw new ApkFormatException(
-                    "Failed to determine APK's target sandbox version"
-                            + " : no manifest element in AndroidManifest.xml");
+                    "Failed to determine APK's " + elementName + " attribute "
+                            + String.format("0x%08X", attributeId)
+                            + " : no " + elementName + " element in AndroidManifest.xml");
         } catch (AndroidBinXmlParser.XmlParserException e) {
             throw new ApkFormatException(
-                    "Failed to determine APK's target sandbox version"
-                            + ": malformed AndroidManifest.xml",
-                    e);
+                    "Failed to determine APK's " + elementName + " attribute "
+                            + String.format("0x%08X", attributeId)
+                            + ": malformed AndroidManifest.xml", e);
         }
+    }
+
+    private static int getMinimumSignatureSchemeVersionForTargetSdk(int targetSdkVersion) {
+        if (targetSdkVersion >= AndroidSdkVersion.R) {
+            return VERSION_APK_SIGNATURE_SCHEME_V2;
+        }
+        return VERSION_JAR_SIGNATURE_SCHEME;
     }
 
     /**
@@ -1581,6 +1705,19 @@ public class ApkVerifier {
         NO_SIG_FOR_TARGET_SANDBOX_VERSION(
                 "Missing APK Signature Scheme v2 signature required for target sandbox version"
                         + " %1$d"),
+
+        /**
+         * APK is targeting an SDK version that requires a minimum signature scheme version, but the
+         * APK is not signed with that version or later.
+         *
+         * <ul>
+         *     <li>Parameter 1: target SDK Version (@code Integer})</li>
+         *     <li>Parameter 2: minimum signature scheme version ((@code Integer})</li>
+         * </ul>
+         */
+        MIN_SIG_SCHEME_FOR_TARGET_SDK_NOT_MET(
+                "Target SDK version %1$d requires a minimum of signature scheme v%2$d; the APK is"
+                        + " not signed with this or a later signature scheme"),
 
         /**
          * APK which is both JAR-signed and signed using APK Signature Scheme v2 contains a JAR
