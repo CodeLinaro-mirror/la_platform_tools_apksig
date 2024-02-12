@@ -16,13 +16,26 @@
 
 package com.android.apksig;
 
-import static com.android.apksig.apk.ApkUtils.SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME;
-import static com.android.apksig.apk.ApkUtils.findZipSections;
 import static com.android.apksig.ApkVerifier.Result.V3SchemeSignerInfo;
+import static com.android.apksig.ApkVerifierTest.assertVerificationWarning;
+import static com.android.apksig.SigningCertificateLineage.SignerCapabilities;
 import static com.android.apksig.SigningCertificateLineageTest.assertLineageContainsExpectedSigners;
 import static com.android.apksig.SigningCertificateLineageTest.assertLineageContainsExpectedSignersWithCapabilities;
-import static com.android.apksig.SigningCertificateLineage.SignerCapabilities;
-import static com.android.apksig.ApkVerifierTest.assertVerificationWarning;
+import static com.android.apksig.apk.ApkUtils.SOURCE_STAMP_CERTIFICATE_HASH_ZIP_ENTRY_NAME;
+import static com.android.apksig.apk.ApkUtils.findZipSections;
+import static com.android.apksig.internal.util.Resources.EC_P256_2_SIGNER_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.EC_P256_SIGNER_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.FIRST_RSA_2048_SIGNER_CERT_WITH_NEGATIVE_MODULUS;
+import static com.android.apksig.internal.util.Resources.FIRST_RSA_2048_SIGNER_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.FIRST_RSA_4096_SIGNER_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.LINEAGE_EC_P256_2_SIGNERS_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.LINEAGE_RSA_2048_2_SIGNERS_2_3_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.LINEAGE_RSA_2048_2_SIGNERS_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.LINEAGE_RSA_2048_3_SIGNERS_1_NO_CAPS_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.LINEAGE_RSA_2048_3_SIGNERS_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.LINEAGE_RSA_2048_TO_RSA_4096_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.SECOND_RSA_2048_SIGNER_RESOURCE_NAME;
+import static com.android.apksig.internal.util.Resources.THIRD_RSA_2048_SIGNER_RESOURCE_NAME;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -56,8 +69,6 @@ import com.android.apksig.util.DataSource;
 import com.android.apksig.util.DataSources;
 import com.android.apksig.zip.ZipFormatException;
 
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.Rule;
 import org.junit.Test;
@@ -80,13 +91,15 @@ import java.security.Security;
 import java.security.Signature;
 import java.security.SignatureException;
 import java.security.cert.X509Certificate;
-import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.List;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 @RunWith(JUnit4.class)
 public class ApkSignerTest {
@@ -96,35 +109,6 @@ public class ApkSignerTest {
      * failures.
      */
     private static final boolean KEEP_FAILING_OUTPUT_AS_FILES = false;
-
-    // All signers with the same prefix and an _X suffix were signed with the private key of the
-    // (X-1) signer.
-    static final String FIRST_RSA_2048_SIGNER_RESOURCE_NAME = "rsa-2048";
-    static final String SECOND_RSA_2048_SIGNER_RESOURCE_NAME = "rsa-2048_2";
-    static final String THIRD_RSA_2048_SIGNER_RESOURCE_NAME = "rsa-2048_3";
-
-    static final String FIRST_RSA_4096_SIGNER_RESOURCE_NAME = "rsa-4096";
-
-    private static final String EC_P256_SIGNER_RESOURCE_NAME = "ec-p256";
-    private static final String EC_P256_2_SIGNER_RESOURCE_NAME = "ec-p256_2";
-
-    // This is the same cert as above with the modulus reencoded to remove the leading 0 sign bit.
-    private static final String FIRST_RSA_2048_SIGNER_CERT_WITH_NEGATIVE_MODULUS =
-            "rsa-2048_negmod.x509.der";
-
-    private static final String LINEAGE_RSA_2048_2_SIGNERS_RESOURCE_NAME =
-            "rsa-2048-lineage-2-signers";
-    private static final String LINEAGE_RSA_2048_3_SIGNERS_RESOURCE_NAME =
-            "rsa-2048-lineage-3-signers";
-    private static final String LINEAGE_RSA_2048_3_SIGNERS_1_NO_CAPS_RESOURCE_NAME =
-            "rsa-2048-lineage-3-signers-1-no-caps";
-    private static final String LINEAGE_RSA_2048_2_SIGNERS_2_3_RESOURCE_NAME =
-            "rsa-2048-lineage-2-signers-2-3";
-    private static final String LINEAGE_RSA_2048_TO_RSA_4096_RESOURCE_NAME =
-            "rsa-2048-to-4096-lineage-2-signers";
-
-    private static final String LINEAGE_EC_P256_2_SIGNERS_RESOURCE_NAME =
-            "ec-p256-lineage-2-signers";
 
     private static final SignerCapabilities DEFAULT_CAPABILITIES =
             new SignerCapabilities.Builder().build();
@@ -851,7 +835,8 @@ public class ApkSignerTest {
             // TODO(b/319494004) see if external/bouncycastle can support this algorithm
             assumeSHA1withDetDSAIsSupported();
             List<ApkSigner.SignerConfig> signers =
-                    Collections.singletonList(getDeterministicDsaSignerConfigFromResources("dsa-2048"));
+                    Collections.singletonList(
+                            getDeterministicDsaSignerConfigFromResources("dsa-2048"));
             String in = "original.apk";
 
             // Sign so that the APK is guaranteed to verify on API Level 1+
@@ -876,7 +861,8 @@ public class ApkSignerTest {
             // TODO(b/319494004) see if external/bouncycastle can support this algorithm
             assumeSHA1withDetDSAIsSupported();
             List<ApkSigner.SignerConfig> signers =
-                    Collections.singletonList(getDeterministicDsaSignerConfigFromResources("dsa-2048"));
+                    Collections.singletonList(
+                            getDeterministicDsaSignerConfigFromResources("dsa-2048"));
             String in = "original.apk";
 
             ApkSigner.Builder apkSignerBuilder = new ApkSigner.Builder(signers).setMinSdkVersion(1);
@@ -2747,11 +2733,13 @@ public class ApkSignerTest {
         ApkSigner.SignerConfig signerTargetT = getDefaultSignerConfigFromResources(
                 THIRD_RSA_2048_SIGNER_RESOURCE_NAME, false, AndroidSdkVersion.T, lineage);
         // Manually instantiate this signer instance to make use of the Builder's setMinSdkVersion.
-        ApkSigner.SignerConfig signerTargetU = new ApkSigner.SignerConfig.Builder(
-                signerTargetT.getName(), signerTargetT.getPrivateKey(),
-                signerTargetT.getCertificates())
-                .setMinSdkVersion(AndroidSdkVersion.U)
-                .build();
+        ApkSigner.SignerConfig signerTargetU =
+                new ApkSigner.SignerConfig.Builder(
+                                signerTargetT.getName(),
+                                signerTargetT.getKeyConfig(),
+                                signerTargetT.getCertificates())
+                        .setMinSdkVersion(AndroidSdkVersion.U)
+                        .build();
         List<ApkSigner.SignerConfig> signerConfigs = Arrays.asList(signerTargetT, signerTargetU);
 
         File signedApk = sign("original-minSdk33.apk",
@@ -3630,8 +3618,12 @@ public class ApkSignerTest {
                 Resources.toPrivateKey(ApkSignerTest.class, keyNameInResources + ".pk8");
         List<X509Certificate> certs =
                 Resources.toCertificateChain(ApkSignerTest.class, keyNameInResources + ".x509.pem");
-        ApkSigner.SignerConfig.Builder signerConfigBuilder = new ApkSigner.SignerConfig.Builder(
-                keyNameInResources, privateKey, certs, deterministicDsaSigning);
+        ApkSigner.SignerConfig.Builder signerConfigBuilder =
+                new ApkSigner.SignerConfig.Builder(
+                        keyNameInResources,
+                        new KeyConfig.Jca(privateKey),
+                        certs,
+                        deterministicDsaSigning);
         if (targetSdkVersion > 0) {
             signerConfigBuilder.setLineageForMinSdkVersion(lineage, targetSdkVersion);
         }
@@ -3644,7 +3636,9 @@ public class ApkSignerTest {
                 Resources.toPrivateKey(ApkSignerTest.class, keyNameInResources + ".pk8");
         List<X509Certificate> certs =
                 Resources.toCertificateChain(ApkSignerTest.class, certNameInResources);
-        return new ApkSigner.SignerConfig.Builder(keyNameInResources, privateKey, certs).build();
+        return new ApkSigner.SignerConfig.Builder(
+                        keyNameInResources, new KeyConfig.Jca(privateKey), certs)
+                .build();
     }
 
     private static ApkSigner.SignerConfig getDeterministicDsaSignerConfigFromResources(
