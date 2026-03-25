@@ -159,7 +159,6 @@ public class ApkSignerTool {
         int maxSdkVersion = Integer.MAX_VALUE;
         int rotationMinSdkVersion = V3SchemeConstants.DEFAULT_ROTATION_MIN_SDK_VERSION;
         int hybridConfigMinSdkVersion = V3SchemeConstants.DEFAULT_HYBRID_CONFIG_MIN_SDK_VERSION;
-        int hybridConfigMaxSdkVersion = Integer.MAX_VALUE;
         boolean rotationTargetsDevRelease = false;
         List<SignerParams> signers = new ArrayList<>(1);
         SignerParams signerParams = new SignerParams();
@@ -300,10 +299,6 @@ public class ApkSignerTool {
                 hybridConfigMinSdkVersion =
                         optionsParser.getRequiredIntValue(
                                 "Minimum API Level for hybrid signing config");
-            } else if ("hybrid-max-sdk-version".equals(optionName)) {
-                hybridConfigMaxSdkVersion =
-                        optionsParser.getRequiredIntValue(
-                                "Maximum API Level for hybrid signing config");
             } else if ("lineage".equals(optionName)) {
                 File lineageFile = new File(optionsParser.getRequiredValue("Lineage file"));
                 lineage = getLineageFromInputFile(lineageFile);
@@ -440,7 +435,6 @@ public class ApkSignerTool {
                                 .setClassicalSignerConfig(hybridClassicalSigner)
                                 .setPqcSignerConfig(hybridPqcSigner)
                                 .setMinSdkVersion(hybridConfigMinSdkVersion)
-                                .setMaxSdkVersion(hybridConfigMaxSdkVersion)
                                 .build();
             }
             if (sourceStampFlagFound) {
